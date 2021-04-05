@@ -1,0 +1,38 @@
+[package]
+name = "initunlock-rs"
+version = "0.1.0"
+authors = ["RageLtMan <rageltman [at] sempervictus>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+"smbios-lib" = "0.7.1"
+"hashicorp_vault" = { git = "https://github.com/sempervictus/vault-rs", branch = "feature/from_reqwest_client" }
+
+"reqwest" = "*"
+
+# Add openssl-sys as a direct dependency so it can be cross compiled to
+# x86_64-unknown-linux-musl using the "vendored" feature below
+openssl-sys = "*"
+
+[features]
+# Force openssl-sys to staticly link in the openssl library.
+# Necessary when cross compiling to x86_64-unknown-linux-musl.
+vendored = ["openssl-sys/vendored"]
+
+[profile.release]
+opt-level = 'z'
+lto = true
+codegen-units = 1
+panic = 'abort'
+
+# Build with:
+#  cargo clean
+#  cargo build \
+#   --target x86_64-unknown-linux-musl \
+#   --release \
+#   --features vendored \
+#   -Z build-std=std,panic_abort \
+#   -Z build-std-features=panic_immediate_abort
+#  strip -s target/x86_64-unknown-linux-musl/release/initunlock-rs
