@@ -1,7 +1,8 @@
-use std::fs;
-use smbioslib::*;
 use hashicorp_vault as vault;
 use reqwest::blocking::Client;
+use smbioslib::*;
+use std::fs;
+use std::io::Write;
 
 // Example mechanism for ensuring host-specific key materiel
 // Can be expanded to read TPM registers and mix them in for entropy/token data
@@ -13,24 +14,26 @@ fn system_ids() -> (String, String) {
         Ok(data) => {
             // Extract UUID
             match data.find_map(|sys_info: SMBiosSystemInformation| sys_info.uuid()) {
-                Some(uuid) => {
-                    match uuid {
-                        SystemUuidData::Uuid(id) => ruid = format!("{:?}",id),
-                        _ => println!("Wrong value for uuid")
-                    }
+                Some(uuid) => match uuid {
+                    SystemUuidData::Uuid(id) => ruid = format!("{:?}", id),
+                    _ => println!("Wrong value for uuid"),
                 },
-                None => println!("No System Information (Type 1) structure found with a UUID field"),
+                None => {
+                    println!("No System Information (Type 1) structure found with a UUID field")
+                }
             };
             // Extract serial number
             match data.find_map(|sys_info: SMBiosSystemInformation| sys_info.serial_number()) {
-                Some(serial) => { 
+                Some(serial) => {
                     rser = serial.clone();
-                },
-                None => println!("No System Information (Type 1) structure found with a UUID field"),
+                }
+                None => {
+                    println!("No System Information (Type 1) structure found with a UUID field")
+                }
             };
-        },
+        }
         // Testing code for now, will need to panic/fail in prod
-        Err(err) => { 
+        Err(err) => {
             println!("failure: {:?}", err);
             rser = "DummySerial".to_string();
             ruid = "DummyUUID".to_string();
@@ -42,7 +45,6 @@ fn system_ids() -> (String, String) {
     (rser, ruid)
 }
 
-// The actual work - currently depends on forked repo to use custom reqwest Client
 fn fetch_secret(sys_id: (String, String), cvars: (String, String)) -> String {
     let client = if cvars.1 == "false" {
         let rc = Client::builder()
@@ -64,7 +66,7 @@ fn read_k_cmdline() -> String {
             .strip_suffix("\n")
             .unwrap()
             .to_string(),
-        Err(_e) => panic!("Could not read kernel commandline")
+        Err(_e) => panic!("Could not read kernel commandline"),
     };
     cmdline
 }
@@ -75,17 +77,20 @@ fn cmdline_vars(cmdline: String) -> (String, String) {
         .split_whitespace()
         .into_iter()
         .filter(|e| e.to_string().starts_with("vault_"))
-        .map(|e| e.to_string()).collect();
+        .map(|e| e.to_string())
+        .collect();
     // Extract vault_url=https://some.host:port from kernel commandline
     let bootvar = vault_vars
-        .iter().find(|e| e.clone().to_string().starts_with("vault_url"));
+        .iter()
+        .find(|e| e.clone().to_string().starts_with("vault_url"));
     let url = match bootvar.as_deref() {
         Some(v) => v.split("=").last().unwrap().to_string(),
         _ => "http://maas:8200".to_string(),
     };
     // Extract vault_ssl_verify=true from kernel commandline
     let bootvar = vault_vars
-        .iter().find(|e| e.clone().to_string().starts_with("vault_ssl_verify"));
+        .iter()
+        .find(|e| e.clone().to_string().starts_with("vault_ssl_verify"));
     let ssl_verify = match bootvar.as_deref() {
         Some(v) => v.split("=").last().unwrap().to_string(),
         _ => "false".to_string(),
@@ -94,10 +99,29 @@ fn cmdline_vars(cmdline: String) -> (String, String) {
 }
 
 fn main() {
-    let sys_id = system_ids();
-    let cvars = cmdline_vars(read_k_cmdline());
-    // println!("Serial #: {}\nUUID: {}",sys_id.0, sys_id.1);
-    let secret = fetch_secret(sys_id, cvars);
-    // println!("Fetched secret: {:#?}",secret);
-    fs::write("/crypto_keyfile.bin", secret).expect("Unable to write keyfile");
+    let keypath = String::from("/crypto_keyfile.bin");
+    // Wipe key and exit if it already exists - post-decrypt execution
+    if std::path::Path::new(&keypath).exists() {
+        let zbuf = vec![0u8; fs::metadata(&keypath).unwrap().len() as usize];
+        {
+            let mut keyfile = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&keypath)
+                .unwrap();
+            keyfile.write_all(&zbuf);
+        }
+        fs::remove_file(&keypath);
+        println!("Zeroed and erased keyfile at {}", keypath);
+    } else {
+        // Pull variables for Vault access, get data, write keyfile
+        let sys_id = system_ids();
+        let cvars = cmdline_vars(read_k_cmdline());
+        let secret = fetch_secret(sys_id, cvars);
+        fs::write(&keypath, secret).expect("Unable to write keyfile");
+        println!(
+            "Acquired secret data from Vault and wrote key-file to {}",
+            keypath
+        );
+    }
 }
